@@ -1,1 +1,33 @@
+# General Python ignores
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.dist-info/
+.eggs/
+
+# Virtual environments and tooling
+.venv/
+env/
+ENV/
+.vscode/
+.idea/
+.pytest_cache/
+.mypy_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project data directories
+storage/images/*
+!storage/images/.gitkeep
+storage/indexes/*
+!storage/indexes/.gitkeep
+storage/db/*
+!storage/db/.gitkeep
+
+# Repository instructions
 .github/*
