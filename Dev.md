@@ -12,6 +12,7 @@ root/
 │  ├─ vector_store/       # Vector store interfaces and implementations
 │  ├─ search/             # Search strategies and pipeline orchestration
 │  ├─ indexing/           # Dataset scanning, indexing, and captioning helpers
+│  ├─ workspaces/         # Workspace metadata and record persistence (JSON + SQLite)
 │  └─ models/             # Domain models shared across layers
 ├─ gui/                   # Desktop GUI scaffolding
 ├─ api/                   # Optional FastAPI application
@@ -65,6 +66,7 @@ python -m scripts.quick_search_demo --text "golden retriever" --k 5
 This loads the stored index, constructs a `SearchPipeline`, and prints the top results.
 
 ## GUI Startup
+`gui/main_window.py` now builds a PySide6-based window that starts in fullscreen mode and toggles fullscreen/normal with `F11`. Tabs are laid out as `viewer`, `search`, and `Databases`; the viewer uses reusable `ImageTile` widgets from `gui/widgets/image_tile.py` that can be embedded anywhere in the UI. The `Databases` tab uses `DatabasesTab` to manage workspaces and explicit records via a left/right splitter (workspaces on the left, records on the right) and delegates persistence to `WorkspaceManager`.
 `gui/main_window.py` currently provides a minimal stub. A future PySide6/PyQt6 implementation should initialize widgets and delegate search actions to `SearchViewModel` and `SearchPipeline` to keep the UI thread lightweight.
 
 ## API Usage
@@ -81,6 +83,7 @@ Endpoints:
 - **Add a new VectorStore**: Implement `VectorStore` in `core/vector_store`, handling `add`, `search`, `save`, `load`, and `get_payload`. Document persistence formats and configuration toggles here.
 - **Add a new SearchStrategy**: Implement `SearchStrategy` in `core/search/strategies.py`, register it in `SearchPipeline`, and describe expected modalities and parameters.
 - **Add captioning or tagging**: Extend `CaptionGenerator` to call real models and integrate the output into metadata and payloads stored with embeddings.
+- **Manage workspaces and indexing sources**: `core/workspaces/workspace_manager.py` persists workspace metadata to JSON in `storage/db/` and explicit/implicit records to a shared SQLite database. Each workspace gets its own embeddings database path recorded in JSON. The `Databases` tab surfaces creation, selection, and record management.
 
 ## Conventions
 - All code comments, docstrings, and documentation are written in English; user-facing explanations in this development process should be in Russian.
