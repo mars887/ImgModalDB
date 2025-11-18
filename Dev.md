@@ -67,6 +67,7 @@ This loads the stored index, constructs a `SearchPipeline`, and prints the top r
 
 ## GUI Startup
 `gui/main_window.py` now builds a PySide6-based window that starts in fullscreen mode and toggles fullscreen/normal with `F11`. Tabs are laid out as `viewer`, `search`, and `Databases`; the viewer uses reusable `ImageTile` widgets from `gui/widgets/image_tile.py` that can be embedded anywhere in the UI. The `Databases` tab uses `DatabasesTab` to manage workspaces and explicit records via a left/right splitter (workspaces on the left, records on the right) and delegates persistence to `WorkspaceManager`.
+`gui/main_window.py` currently provides a minimal stub. A future PySide6/PyQt6 implementation should initialize widgets and delegate search actions to `SearchViewModel` and `SearchPipeline` to keep the UI thread lightweight.
 
 ## API Usage
 `api/app.py` exposes a FastAPI application factory. To run the API, supply a configured `SearchPipeline` and mount the app using Uvicorn:
