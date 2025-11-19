@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "workspaces_dir": "workspaces",
+  "global_index_db": "global_index.sqlite",
+  "hash_db": "image_hashes.sqlite",
+  "tasks": {
+    "phash_144": {
+      "type": "hash",
+      "backend": "sqlite",
+      "mode": "image",
+      "algorithm": "phash",
+      "bits": 144
+    }
+  }
+}

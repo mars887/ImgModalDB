@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.6",
     "tqdm>=4.66",
     "loguru>=0.7",
+    "ImageHash>=4.3",
 ]
 
 [project.optional-dependencies]
