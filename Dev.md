@@ -83,7 +83,7 @@ Endpoints:
 - **Add a new VectorStore**: Implement `VectorStore` in `core/vector_store`, handling `add`, `search`, `save`, `load`, and `get_payload`. Document persistence formats and configuration toggles here.
 - **Add a new SearchStrategy**: Implement `SearchStrategy` in `core/search/strategies.py`, register it in `SearchPipeline`, and describe expected modalities and parameters.
 - **Add captioning or tagging**: Extend `CaptionGenerator` to call real models and integrate the output into metadata and payloads stored with embeddings.
-- **Manage workspaces and indexing sources**: `core/workspaces/workspace_manager.py` persists workspace metadata to JSON in `storage/db/` and explicit/implicit records to a shared SQLite database. Each workspace gets its own embeddings database path recorded in JSON. The `Databases` tab surfaces creation, selection, and record management.
+- **Manage workspaces and indexing sources**: `core/workspaces/manager_v2.py` persists workspace metadata to per-workspace `config.json` files under `workspaces/` and explicit records to per-workspace `records.sqlite` databases. All discovered images for a workspace live in `images.sqlite` alongside task status in `image_tasks`. Global status and file hashes are stored in `global_index.sqlite` and `image_hashes.sqlite` respectively. The `Databases` tab surfaces creation, selection, and record management via `WorkspaceManager` (a thin wrapper around `WorkspaceManagerV2`).
 
 ## Conventions
 - All code comments, docstrings, and documentation are written in English; user-facing explanations in this development process should be in Russian.

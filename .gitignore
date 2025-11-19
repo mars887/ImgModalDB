@@ -31,3 +31,6 @@ storage/db/*
 
 # Repository instructions
 .github/*
+workspaces/*
+global_index.sqlite
+image_hashes.sqlite

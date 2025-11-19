@@ -16,6 +16,9 @@ from typing import Dict, List, Optional, Tuple
 import hashlib
 import os
 
+from PIL import Image
+
+from core.indexing.scanner import SUPPORTED_EXTENSIONS
 from core.tasks import GlobalConfig, TaskContext, TaskCoordinator, TaskRegistry
 
 
@@ -50,6 +53,37 @@ class WorkspaceConfig:
             auto_index=bool(payload.get("auto_index", False)),
             task_overrides=payload.get("task_overrides") or {},
         )
+
+
+@dataclass
+class WorkspaceRecord:
+    """Explicit record entry stored in records.sqlite for a workspace."""
+
+    id: int
+    path: Path
+    is_directory: bool
+    is_recursive: bool = False
+
+
+@dataclass
+class WorkspaceStats:
+    """Aggregated statistics for a workspace."""
+
+    total_records: int
+    total_images: int
+    indexed_images: int
+
+
+@dataclass
+class RecordStats:
+    """Per-record statistics describing image and index coverage."""
+
+    total_images: int
+    indexed_images: int
+    format: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    size_bytes: Optional[int] = None
 
 
 class WorkspaceManagerV2:
@@ -308,38 +342,30 @@ class WorkspaceManagerV2:
             conn.commit()
             return cursor.lastrowid or 0
 
-    def list_explicit_records(self, workspace_id: str) -> List[Dict]:
-        """Return all explicit records for the given workspace as dictionaries.
-
-        This lightweight representation is intended for GUI consumption.
-        """
+    def list_explicit_records(self, workspace_id: str) -> List[WorkspaceRecord]:
+        """Return all explicit records for the given workspace."""
 
         workspace_dir = self._workspace_dir(workspace_id)
         db_path = workspace_dir / "records.sqlite"
         with sqlite3.connect(db_path) as conn:
             cursor = conn.execute(
                 """
-                SELECT id, path, is_directory, is_recursive, include_patterns, exclude_patterns, note
+                SELECT id, path, is_directory, is_recursive
                 FROM explicit_records
                 ORDER BY path
                 """
             )
             rows = cursor.fetchall()
 
-        records: List[Dict] = []
+        records: List[WorkspaceRecord] = []
         for row in rows:
-            include_patterns = json.loads(row[4]) if row[4] is not None else None
-            exclude_patterns = json.loads(row[5]) if row[5] is not None else None
             records.append(
-                {
-                    "id": int(row[0]),
-                    "path": row[1],
-                    "is_directory": bool(row[2]),
-                    "is_recursive": bool(row[3]),
-                    "include_patterns": include_patterns,
-                    "exclude_patterns": exclude_patterns,
-                    "note": row[6],
-                }
+                WorkspaceRecord(
+                    id=int(row[0]),
+                    path=Path(row[1]),
+                    is_directory=bool(row[2]),
+                    is_recursive=bool(row[3]),
+                )
             )
         return records
 
@@ -387,6 +413,232 @@ class WorkspaceManagerV2:
             cursor = conn.execute("SELECT id FROM images WHERE path = ?", (path,))
             row = cursor.fetchone()
             return int(row[0]) if row else 0
+
+    # Compatibility-style helpers used by existing GUI code
+    def add_path(self, workspace_id: str, path: Path) -> None:
+        """Add an explicit record and register discovered images for GUI workflows.
+
+        This method mirrors the previous WorkspaceManager.add_path signature while
+        delegating actual storage to records.sqlite and images.sqlite.
+        """
+
+        cfg = self.get_workspace(workspace_id)
+        if cfg is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+
+        path = path.resolve()
+        if path.is_dir():
+            record_id = self.add_explicit_record(
+                workspace_id=workspace_id,
+                path=path,
+                is_directory=True,
+                is_recursive=False,
+            )
+            for file_path in path.rglob("*"):
+                if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    self._register_image_with_metadata(workspace_id, file_path, parent_record_id=record_id)
+        elif path.is_file():
+            record_id = self.add_explicit_record(
+                workspace_id=workspace_id,
+                path=path,
+                is_directory=False,
+                is_recursive=False,
+            )
+            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                self._register_image_with_metadata(workspace_id, path, parent_record_id=record_id)
+        else:
+            raise FileNotFoundError(f"Path {path} not found")
+
+    def _register_image_with_metadata(
+        self,
+        workspace_id: str,
+        path: Path,
+        parent_record_id: Optional[int],
+    ) -> None:
+        """Register a single image into images.sqlite with basic metadata."""
+
+        format_str: Optional[str]
+        width: Optional[int]
+        height: Optional[int]
+        size_bytes: Optional[int]
+
+        try:
+            stat = path.stat()
+            size_bytes = stat.st_size
+        except OSError:
+            size_bytes = None
+
+        try:
+            with Image.open(path) as img:
+                format_str = img.format or (path.suffix.lstrip(".").upper() or None)
+                width, height = img.size
+        except (OSError, FileNotFoundError):
+            format_str = path.suffix.lstrip(".").upper() or None
+            width = None
+            height = None
+
+        self.register_image(
+            workspace_id=workspace_id,
+            path=path,
+            parent_record_id=parent_record_id,
+            file_hash=None,
+            format=format_str,
+            width=width,
+            height=height,
+            size_bytes=size_bytes,
+        )
+
+    def remove_explicit_record(self, workspace_id: str, record_id: int) -> None:
+        """Remove an explicit record and any images tied to it."""
+
+        workspace_dir = self._workspace_dir(workspace_id)
+        records_db = workspace_dir / "records.sqlite"
+        images_db = workspace_dir / "images.sqlite"
+
+        with sqlite3.connect(images_db) as conn:
+            conn.execute("DELETE FROM images WHERE parent_record_id = ?", (record_id,))
+            conn.commit()
+
+        with sqlite3.connect(records_db) as conn:
+            conn.execute("DELETE FROM explicit_records WHERE id = ?", (record_id,))
+            conn.commit()
+
+    def set_record_recursive(self, workspace_id: str, record_id: int, is_recursive: bool) -> None:
+        """Update the recursion flag for an explicit directory record."""
+
+        workspace_dir = self._workspace_dir(workspace_id)
+        records_db = workspace_dir / "records.sqlite"
+        with sqlite3.connect(records_db) as conn:
+            conn.execute(
+                "UPDATE explicit_records SET is_recursive = ? WHERE id = ?",
+                (int(is_recursive), record_id),
+            )
+            conn.commit()
+
+    def get_workspace_stats(self, workspace_id: str) -> WorkspaceStats:
+        """Return simple aggregated statistics for a workspace."""
+
+        workspace_dir = self._workspace_dir(workspace_id)
+        records_db = workspace_dir / "records.sqlite"
+        images_db = workspace_dir / "images.sqlite"
+
+        total_records = 0
+        total_images = 0
+        indexed_images = 0
+
+        with sqlite3.connect(records_db) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM explicit_records")
+            row = cursor.fetchone()
+            if row:
+                total_records = int(row[0])
+
+        if images_db.exists():
+            with sqlite3.connect(images_db) as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM images")
+                row = cursor.fetchone()
+                if row:
+                    total_images = int(row[0])
+
+                workspace = self.get_workspace(workspace_id)
+                task_name = workspace.tasks[0] if workspace and workspace.tasks else None
+                if task_name:
+                    cursor = conn.execute(
+                        "SELECT COUNT(*) FROM image_tasks WHERE task_name = ? AND status = 'done'",
+                        (task_name,),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        indexed_images = int(row[0])
+
+        return WorkspaceStats(total_records=total_records, total_images=total_images, indexed_images=indexed_images)
+
+    def has_stats(self, workspace_id: str) -> bool:
+        """Return True when basic statistics can be provided for the workspace.
+
+        Statistics are computed on demand from SQLite databases, so they are
+        always considered available once the workspace exists.
+        """
+
+        return self.get_workspace(workspace_id) is not None
+
+    def get_record_stats_for_workspace(self, workspace_id: str) -> Dict[int, RecordStats]:
+        """Return per-record statistics keyed by explicit_records.id."""
+
+        workspace_dir = self._workspace_dir(workspace_id)
+        images_db = workspace_dir / "images.sqlite"
+        stats: Dict[int, RecordStats] = {}
+
+        if not images_db.exists():
+            return stats
+
+        workspace = self.get_workspace(workspace_id)
+        task_name = workspace.tasks[0] if workspace and workspace.tasks else None
+
+        with sqlite3.connect(images_db) as conn:
+            if task_name:
+                cursor = conn.execute(
+                    """
+                    SELECT
+                        i.parent_record_id,
+                        COUNT(i.id) AS total_images,
+                        SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS indexed_images,
+                        MAX(i.format) AS format,
+                        MAX(i.width) AS width,
+                        MAX(i.height) AS height,
+                        MAX(i.size_bytes) AS size_bytes
+                    FROM images AS i
+                    LEFT JOIN image_tasks AS t
+                        ON i.id = t.image_id AND t.task_name = ?
+                    WHERE i.parent_record_id IS NOT NULL
+                    GROUP BY i.parent_record_id
+                    """,
+                    (task_name,),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    SELECT
+                        i.parent_record_id,
+                        COUNT(i.id) AS total_images,
+                        0 AS indexed_images,
+                        MAX(i.format) AS format,
+                        MAX(i.width) AS width,
+                        MAX(i.height) AS height,
+                        MAX(i.size_bytes) AS size_bytes
+                    FROM images AS i
+                    WHERE i.parent_record_id IS NOT NULL
+                    GROUP BY i.parent_record_id
+                    """
+                )
+
+            for row in cursor.fetchall():
+                parent_id = int(row[0])
+                total_images = int(row[1] or 0)
+                indexed_images = int(row[2] or 0)
+                fmt = row[3]
+                width = int(row[4]) if row[4] is not None else None
+                height = int(row[5]) if row[5] is not None else None
+                size_bytes = int(row[6]) if row[6] is not None else None
+                stats[parent_id] = RecordStats(
+                    total_images=total_images,
+                    indexed_images=indexed_images,
+                    format=fmt,
+                    width=width,
+                    height=height,
+                    size_bytes=size_bytes,
+                )
+
+        return stats
+
+    def rebuild_stats(self, workspace_id: str) -> None:
+        """Compatibility hook for legacy callers.
+
+        Statistics are computed on demand from SQLite databases, so this
+        method currently performs no additional work.
+        """
+
+        # Intentionally a no-op; kept for interface compatibility.
+        _ = self.get_workspace_stats(workspace_id)
 
 
 class WorkspaceTaskCoordinator(TaskCoordinator):

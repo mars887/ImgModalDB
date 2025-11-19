@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ class TaskDefinition:
     algorithm: Optional[str] = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class GlobalConfig:
     """Top-level configuration loaded from global_config.json."""
 
@@ -41,6 +41,7 @@ class GlobalConfig:
     global_index_db: Path
     hash_db: Path
     tasks: Dict[str, TaskDefinition]
+    current_workspace_id: Optional[str] = None
 
 
 class TaskRegistry:
@@ -52,8 +53,9 @@ class TaskRegistry:
     - indexing task definitions.
     """
 
-    def __init__(self, config: GlobalConfig) -> None:
+    def __init__(self, config: GlobalConfig, config_path: Optional[Path] = None) -> None:
         self._config = config
+        self._config_path = config_path or Path("global_config.json")
 
     @classmethod
     def from_file(cls, path: Path | str = "global_config.json") -> "TaskRegistry":
@@ -66,6 +68,7 @@ class TaskRegistry:
         workspaces_dir = Path(payload.get("workspaces_dir", "workspaces"))
         global_index_db = Path(payload.get("global_index_db", "global_index.sqlite"))
         hash_db = Path(payload.get("hash_db", "image_hashes.sqlite"))
+        current_workspace_id = payload.get("current_workspace_id")
 
         raw_tasks = payload.get("tasks") or {}
         tasks: Dict[str, TaskDefinition] = {}
@@ -88,8 +91,9 @@ class TaskRegistry:
             global_index_db=global_index_db,
             hash_db=hash_db,
             tasks=tasks,
+            current_workspace_id=current_workspace_id,
         )
-        return cls(config)
+        return cls(config, config_path=cfg_path)
 
     @property
     def config(self) -> GlobalConfig:
@@ -115,6 +119,18 @@ class TaskRegistry:
 
         return self._config.hash_db
 
+    @property
+    def current_workspace_id(self) -> Optional[str]:
+        """Return the currently selected workspace id if set."""
+
+        return self._config.current_workspace_id
+
+    def set_current_workspace_id(self, workspace_id: Optional[str]) -> None:
+        """Persist the currently selected workspace id back to the config file."""
+
+        self._config.current_workspace_id = workspace_id
+        self._save()
+
     def get_task(self, name: str) -> Optional[TaskDefinition]:
         """Return the definition for a given task name if present."""
 
@@ -125,3 +141,36 @@ class TaskRegistry:
 
         return self._config.tasks.values()
 
+    def _save(self) -> None:
+        """Persist the current GlobalConfig back to the JSON file."""
+
+        payload: Dict[str, Any] = {
+            "version": self._config.version,
+            "workspaces_dir": str(self._config.workspaces_dir),
+            "global_index_db": str(self._config.global_index_db),
+            "hash_db": str(self._config.hash_db),
+        }
+        if self._config.current_workspace_id is not None:
+            payload["current_workspace_id"] = self._config.current_workspace_id
+
+        tasks_payload: Dict[str, Dict[str, Any]] = {}
+        for name, task in self._config.tasks.items():
+            task_payload: Dict[str, Any] = {
+                "type": task.type,
+                "backend": task.backend,
+                "mode": task.mode,
+            }
+            if task.dim is not None:
+                task_payload["dim"] = task.dim
+            if task.bits is not None:
+                task_payload["bits"] = task.bits
+            if task.model_ref is not None:
+                task_payload["model_ref"] = task.model_ref
+            if task.version is not None:
+                task_payload["version"] = task.version
+            if task.algorithm is not None:
+                task_payload["algorithm"] = task.algorithm
+            tasks_payload[name] = task_payload
+
+        payload["tasks"] = tasks_payload
+        self._config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

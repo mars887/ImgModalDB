@@ -22,11 +22,11 @@ from .view_models import SearchViewModel
 class MainWindow(QMainWindow):
     """Main application window that hosts viewer, search, and databases tabs."""
 
-    def __init__(self, pipeline: SearchPipeline, workspace_dir: Path | str = Path("storage/db")) -> None:
+    def __init__(self, pipeline: SearchPipeline, project_root: Path | str = Path(".")) -> None:
         super().__init__()
         self.pipeline = pipeline
         self.view_model = SearchViewModel(pipeline)
-        self.workspace_manager = WorkspaceManager(workspace_dir)
+        self.workspace_manager = WorkspaceManager(project_root)
         self.setWindowTitle("ImgModalDB")
         self.tabs = QTabWidget()
         self._build_tabs()

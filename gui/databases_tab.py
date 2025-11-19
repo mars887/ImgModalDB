@@ -1,7 +1,7 @@
 # Path: gui/databases_tab.py
 # Purpose: Provide the Databases tab UI for managing workspaces and their records.
 # Layer: gui.
-# Details: Uses WorkspaceManager to store workspace metadata (JSON) and explicit/implicit records (SQLite).
+# Details: Uses WorkspaceManager (V2) to store workspace metadata and explicit records backed by per-workspace SQLite.
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class _StatsWorker(QThread):
     def run(self) -> None:  # type: ignore[override]
         """
         External calls:
-        - core/workspaces/workspace_manager.py::WorkspaceManager.rebuild_stats - recompute and persist workspace stats.
+        - core/workspaces/manager_v2.py::WorkspaceManagerV2.rebuild_stats - recompute and persist workspace stats.
         """
 
         self._manager.rebuild_stats(self._workspace_id)
@@ -67,7 +67,7 @@ class _AddPathsWorker(QThread):
     def run(self) -> None:  # type: ignore[override]
         """
         External calls:
-        - core/workspaces/workspace_manager.py::WorkspaceManager.add_path - insert explicit and implicit records.
+        - core/workspaces/manager_v2.py::WorkspaceManagerV2.add_path - insert explicit records and discovered images.
         """
 
         try:
