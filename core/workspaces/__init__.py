@@ -101,6 +101,26 @@ class WorkspaceManager:
     def has_stats(self, workspace_id: str) -> bool:
         return self._manager.has_stats(workspace_id)
 
+    def list_images(
+        self,
+        workspace_id: str,
+        limit: int = 200,
+        offset: int = 0,
+        min_size_bytes: int | None = None,
+        max_size_bytes: int | None = None,
+        min_megapixels: float | None = None,
+        max_megapixels: float | None = None,
+    ):
+        return self._manager.list_images(
+            workspace_id=workspace_id,
+            limit=limit,
+            offset=offset,
+            min_size_bytes=min_size_bytes,
+            max_size_bytes=max_size_bytes,
+            min_megapixels=min_megapixels,
+            max_megapixels=max_megapixels,
+        )
+
 
 # Public exports
 Workspace = WorkspaceConfig

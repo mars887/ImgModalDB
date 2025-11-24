@@ -20,6 +20,7 @@ import os
 from PIL import Image
 
 from core.indexing.scanner import SUPPORTED_EXTENSIONS
+from core.models.domain import ImageRecord
 from core.tasks import GlobalConfig, TaskContext, TaskCoordinator, TaskRegistry
 
 
@@ -74,6 +75,7 @@ class WorkspaceStats:
     total_images: int
     indexed_images: int
     indexed_by_task: Dict[str, int] = field(default_factory=dict)
+    internal: Optional[InternalStats] = None
 
 
 @dataclass
@@ -87,6 +89,16 @@ class RecordStats:
     height: Optional[int] = None
     size_bytes: Optional[int] = None
     indexed_by_task: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class InternalStats:
+    """Internal-only statistics for UI configuration (slider ranges, etc.)."""
+
+    file_size_min: Optional[int] = None
+    file_size_max: Optional[int] = None
+    megapixels_min: Optional[float] = None
+    megapixels_max: Optional[float] = None
 
 
 class WorkspaceManagerV2:
@@ -608,6 +620,71 @@ class WorkspaceManagerV2:
             size_bytes=size_bytes,
         )
 
+    def list_images(
+        self,
+        workspace_id: str,
+        limit: int = 200,
+        offset: int = 0,
+        min_size_bytes: Optional[int] = None,
+        max_size_bytes: Optional[int] = None,
+        min_megapixels: Optional[float] = None,
+        max_megapixels: Optional[float] = None,
+    ) -> List[ImageRecord]:
+        """Return a slice of images for a workspace with optional filtering."""
+
+        workspace_dir = self._workspace_dir(workspace_id)
+        images_db = workspace_dir / "images.sqlite"
+        if not images_db.exists():
+            return []
+
+        conditions: List[str] = []
+        params: List[object] = []
+
+        if min_size_bytes is not None:
+            conditions.append("(size_bytes IS NULL OR size_bytes >= ?)")
+            params.append(int(min_size_bytes))
+        if max_size_bytes is not None:
+            conditions.append("(size_bytes IS NULL OR size_bytes <= ?)")
+            params.append(int(max_size_bytes))
+
+        if min_megapixels is not None:
+            conditions.append("(width IS NULL OR height IS NULL OR width * height >= ?)")
+            params.append(int(min_megapixels * 1_000_000))
+        if max_megapixels is not None:
+            conditions.append("(width IS NULL OR height IS NULL OR width * height <= ?)")
+            params.append(int(max_megapixels * 1_000_000))
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+        query = f"""
+            SELECT id, path, width, height, size_bytes
+            FROM images
+            {where_clause}
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT ? OFFSET ?
+        """
+        params.append(int(limit))
+        params.append(max(0, int(offset)))
+
+        with self._connect_sqlite(images_db) as conn:
+            cursor = conn.execute(query, params)
+            rows = cursor.fetchall()
+
+        images: List[ImageRecord] = []
+        for image_id, path_str, width, height, size_bytes in rows:
+            images.append(
+                ImageRecord(
+                    id=int(image_id),
+                    path=Path(path_str),
+                    width=int(width) if width is not None else None,
+                    height=int(height) if height is not None else None,
+                    size_bytes=int(size_bytes) if size_bytes is not None else None,
+                )
+            )
+        return images
+
     def remove_explicit_record(self, workspace_id: str, record_id: int) -> None:
         """Remove an explicit record and any images tied to it."""
 
@@ -662,6 +739,7 @@ class WorkspaceManagerV2:
         total_images = 0
         indexed_images = 0
         indexed_by_task: Dict[str, int] = {}
+        internal_stats = InternalStats()
         workspace = self.get_workspace(workspace_id)
         task_names = workspace.tasks if workspace and workspace.tasks else []
 
@@ -677,6 +755,25 @@ class WorkspaceManagerV2:
                 row = cursor.fetchone()
                 if row:
                     total_images = int(row[0])
+
+                meta_cursor = conn.execute(
+                    """
+                    SELECT
+                        MIN(size_bytes),
+                        MAX(size_bytes),
+                        MIN(CASE WHEN width IS NOT NULL AND height IS NOT NULL THEN width * height ELSE NULL END),
+                        MAX(CASE WHEN width IS NOT NULL AND height IS NOT NULL THEN width * height ELSE NULL END)
+                    FROM images
+                    """
+                )
+                meta_row = meta_cursor.fetchone()
+                if meta_row:
+                    internal_stats.file_size_min = int(meta_row[0]) if meta_row[0] is not None else None
+                    internal_stats.file_size_max = int(meta_row[1]) if meta_row[1] is not None else None
+                    min_pixels = meta_row[2]
+                    max_pixels = meta_row[3]
+                    internal_stats.megapixels_min = float(min_pixels) / 1_000_000 if min_pixels is not None else None
+                    internal_stats.megapixels_max = float(max_pixels) / 1_000_000 if max_pixels is not None else None
 
                 for task_name in task_names:
                     cursor = conn.execute(
@@ -694,6 +791,7 @@ class WorkspaceManagerV2:
             total_images=total_images,
             indexed_images=indexed_images,
             indexed_by_task=indexed_by_task,
+            internal=internal_stats,
         )
 
     def has_stats(self, workspace_id: str) -> bool:

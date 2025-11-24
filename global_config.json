@@ -3,7 +3,7 @@
   "workspaces_dir": "workspaces",
   "global_index_db": "global_index.sqlite",
   "hash_db": "image_hashes.sqlite",
-  "current_workspace_id": "2440ed8825fa44ff8e86384bfa4b539e",
+  "current_workspace_id": "06853f34e4c346bba23c8bb9494c1917",
   "tasks": {
     "phash_144": {
       "type": "hash",

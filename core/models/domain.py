@@ -19,6 +19,7 @@ class ImageRecord:
     path: Path
     width: Optional[int] = None
     height: Optional[int] = None
+    size_bytes: Optional[int] = None
     tags: List[str] = field(default_factory=list)
     caption: Optional[str] = None
 
