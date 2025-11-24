@@ -28,7 +28,10 @@ class VectorStoreSettings(BaseModel):
 class AppSettings(BaseModel):
     """Top-level application settings shared across services and interfaces."""
 
-    image_folder: Path = Field(default=Path("C:\Users\prio7\OneDrive\Desktop\tgcat\filtered"), description="Root folder containing user images.")
+    image_folder: Path = Field(
+        default=Path(r"C:\Users\prio7\OneDrive\Desktop\tgcat\filtered"),
+        description="Root folder containing user images.",
+    )
     database_path: Path = Field(default=Path("storage/db/metadata.sqlite3"), description="Path to local metadata database.")
     batch_size: int = Field(default=8, description="Batch size for indexing tasks.")
     embedder: EmbedderSettings = Field(default_factory=EmbedderSettings)

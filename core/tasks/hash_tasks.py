@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Tuple
+import threading
 
 import numpy as np
 from PIL import Image
@@ -86,8 +87,9 @@ class HashDatabase(TaskDatabase):
     SUPPORTED_TASKS = {"phash_144"}
 
     def __init__(self) -> None:
-        self._conn: sqlite3.Connection | None = None
+        self._connections: dict[int, sqlite3.Connection] = {}
         self._table_name: str | None = None
+        self._lock = threading.Lock()
 
     def can_handle_task(self, task_name: str) -> bool:
         return task_name in self.SUPPORTED_TASKS
@@ -95,12 +97,15 @@ class HashDatabase(TaskDatabase):
     def prepare(self, ctx: TaskContext) -> None:
         index_path = ctx.workspace_dir / "index" / f"{ctx.task_name}.sqlite"
         index_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(index_path)
+        thread_key = threading.get_ident()
+        conn = sqlite3.connect(index_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        with self._lock:
+            self._connections[thread_key] = conn
         # Derive a stable table name from the task name.
         sanitized = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in ctx.task_name)
         self._table_name = f"{sanitized}_index"
-        assert self._conn is not None
-        self._conn.execute(
+        conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {self._table_name} (
                 image_id INTEGER PRIMARY KEY,
@@ -108,17 +113,19 @@ class HashDatabase(TaskDatabase):
             )
             """
         )
-        self._conn.execute(
+        conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{self._table_name}_hash_value "
             f"ON {self._table_name}(hash_value)"
         )
-        self._conn.commit()
+        conn.commit()
 
     def save_result(self, ctx: TaskContext, image_id: int, result: int) -> None:
-        if self._conn is None or self._table_name is None:
+        thread_key = threading.get_ident()
+        conn = self._connections.get(thread_key)
+        if conn is None or self._table_name is None:
             raise RuntimeError("HashDatabase.save_result called before prepare().")
         hash_int = int(result)
-        self._conn.execute(
+        conn.execute(
             f"""
             INSERT INTO {self._table_name} (image_id, hash_value)
             VALUES (?, ?)
@@ -126,9 +133,11 @@ class HashDatabase(TaskDatabase):
             """,
             (image_id, hash_int),
         )
-        self._conn.commit()
+        conn.commit()
 
     def finalize(self, ctx: TaskContext) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        thread_key = threading.get_ident()
+        with self._lock:
+            conn = self._connections.pop(thread_key, None)
+        if conn is not None:
+            conn.close()

@@ -84,6 +84,8 @@ Endpoints:
 - **Add a new SearchStrategy**: Implement `SearchStrategy` in `core/search/strategies.py`, register it in `SearchPipeline`, and describe expected modalities and parameters.
 - **Add captioning or tagging**: Extend `CaptionGenerator` to call real models and integrate the output into metadata and payloads stored with embeddings.
 - **Manage workspaces and indexing sources**: `core/workspaces/manager_v2.py` persists workspace metadata to per-workspace `config.json` files under `workspaces/` and explicit records to per-workspace `records.sqlite` databases. All discovered images for a workspace live in `images.sqlite` alongside task status in `image_tasks`. Global status and file hashes are stored in `global_index.sqlite` and `image_hashes.sqlite` respectively. The `Databases` tab surfaces creation, selection, and record management via `WorkspaceManager` (a thin wrapper around `WorkspaceManagerV2`).
+- Workspace discovery honors recursion and include/exclude patterns stored per record, reuses existing record ids to keep foreign keys and stats intact, and aggregates stats across all configured tasks (with per-task counts exposed in `WorkspaceStats.indexed_by_task`).
+- Task execution: `TaskCoordinator.claim_pending_images` marks rows as `in_progress` before handing them to executors, and `TaskManager.run_all_tasks_for_workspace` can iterate over all tasks declared for a workspace sequentially while letting executors manage their own parallelism.
 
 ## Conventions
 - All code comments, docstrings, and documentation are written in English; user-facing explanations in this development process should be in Russian.

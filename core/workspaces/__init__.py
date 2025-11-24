@@ -45,6 +45,9 @@ class WorkspaceManager:
     def get_workspace(self, workspace_id: str) -> Optional[WorkspaceConfig]:
         return self._manager.get_workspace(workspace_id)
 
+    def workspace_dir_for(self, workspace_id: str) -> Path:
+        return self._manager.workspace_dir_for(workspace_id)
+
     def create_workspace(self, name: str) -> WorkspaceConfig:
         workspace = self._manager.create_workspace(name)
         self.current_workspace_id = workspace.id
@@ -58,8 +61,23 @@ class WorkspaceManager:
         self._registry.set_current_workspace_id(workspace_id)
 
     # Explicit records and images
-    def add_path(self, workspace_id: str, path: Path) -> None:
-        self._manager.add_path(workspace_id, path)
+    def add_path(
+        self,
+        workspace_id: str,
+        path: Path,
+        is_recursive: bool | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+        note: str | None = None,
+    ) -> None:
+        self._manager.add_path(
+            workspace_id=workspace_id,
+            path=path,
+            is_recursive=is_recursive,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            note=note,
+        )
 
     def list_explicit_records(self, workspace_id: str) -> list[WorkspaceRecord]:
         return self._manager.list_explicit_records(workspace_id)

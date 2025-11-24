@@ -48,8 +48,8 @@ class TaskDatabase(Protocol):
 class TaskCoordinator(Protocol):
     """Coordinate status updates across images.sqlite, global_index.sqlite, and hash databases."""
 
-    def get_pending_images(self, ctx: TaskContext) -> List[Tuple[int, Path]]:
-        """Return all images that require work for the given task in the given workspace."""
+    def claim_pending_images(self, ctx: TaskContext, limit: int | None = None) -> List[Tuple[int, Path]]:
+        """Claim and return images that require work for the given task in the given workspace."""
 
     def mark_task_success(
         self,
@@ -108,16 +108,32 @@ class TaskManager:
                 return db
         raise RuntimeError(f"No database handler found for task {task_name}")
 
-    def run_task_for_workspace(self, ctx: TaskContext) -> None:
+    def run_task_for_workspace(self, ctx: TaskContext, limit: int | None = None) -> None:
         """Run a single task for all pending images in a workspace."""
 
         executor = self._get_executor_for_task(ctx.task_name)
         db = self._get_db_for_task(ctx.task_name)
 
-        pending_images = self._coordinator.get_pending_images(ctx)
+        pending_images = self._coordinator.claim_pending_images(ctx, limit=limit)
         if not pending_images:
             return
 
         # The executor is responsible for calling db.prepare / db.finalize
         # at appropriate times relative to its own concurrency model.
         executor.run_batch(ctx, pending_images, db, self._coordinator)
+
+    def run_all_tasks_for_workspace(
+        self,
+        workspace_id: str,
+        task_names: Iterable[str],
+        workspace_dir: Path,
+        limit_per_task: int | None = None,
+    ) -> None:
+        """Run all configured tasks for a workspace sequentially.
+
+        Executors remain responsible for internal parallelism.
+        """
+
+        for task_name in task_names:
+            ctx = TaskContext(workspace_id=workspace_id, task_name=task_name, workspace_dir=workspace_dir)
+            self.run_task_for_workspace(ctx, limit=limit_per_task)

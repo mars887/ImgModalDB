@@ -9,7 +9,8 @@ import json
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import fnmatch
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -72,6 +73,7 @@ class WorkspaceStats:
     total_records: int
     total_images: int
     indexed_images: int
+    indexed_by_task: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -84,6 +86,7 @@ class RecordStats:
     width: Optional[int] = None
     height: Optional[int] = None
     size_bytes: Optional[int] = None
+    indexed_by_task: Dict[str, int] = field(default_factory=dict)
 
 
 class WorkspaceManagerV2:
@@ -105,6 +108,15 @@ class WorkspaceManagerV2:
         self._workspaces: Dict[str, WorkspaceConfig] = {}
         self._load_workspaces()
         self._ensure_global_dbs()
+
+    # SQLite helpers
+    @staticmethod
+    def _connect_sqlite(path: Path) -> sqlite3.Connection:
+        """Create a SQLite connection with foreign keys enabled."""
+
+        conn = sqlite3.connect(path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
     # Public helpers
     def workspace_dir_for(self, workspace_id: str) -> Path:
@@ -197,7 +209,7 @@ class WorkspaceManagerV2:
 
         db_path = (self.project_root / self.global_config.global_index_db).resolve()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS global_index (
@@ -224,7 +236,7 @@ class WorkspaceManagerV2:
 
         db_path = (self.project_root / self.global_config.hash_db).resolve()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS image_hashes (
@@ -243,7 +255,7 @@ class WorkspaceManagerV2:
         """Ensure records.sqlite exists with the explicit_records schema."""
 
         db_path = workspace_dir / "records.sqlite"
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS explicit_records (
@@ -266,7 +278,7 @@ class WorkspaceManagerV2:
         """Ensure images.sqlite exists with images and image_tasks schemas."""
 
         db_path = workspace_dir / "images.sqlite"
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS images (
@@ -322,8 +334,38 @@ class WorkspaceManagerV2:
         db_path = workspace_dir / "records.sqlite"
         include_json = json.dumps(include_patterns) if include_patterns is not None else None
         exclude_json = json.dumps(exclude_patterns) if exclude_patterns is not None else None
+        abs_path = str(path.resolve().as_posix())
 
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
+            existing = conn.execute(
+                """
+                SELECT id, is_directory, is_recursive, include_patterns, exclude_patterns, note
+                FROM explicit_records
+                WHERE path = ?
+                """,
+                (abs_path,),
+            ).fetchone()
+            if existing:
+                record_id = int(existing[0])
+                # Update metadata if flags or patterns changed.
+                conn.execute(
+                    """
+                    UPDATE explicit_records
+                    SET is_directory = ?, is_recursive = ?, include_patterns = ?, exclude_patterns = ?, note = COALESCE(?, note)
+                    WHERE id = ?
+                    """,
+                    (
+                        int(is_directory),
+                        int(is_recursive),
+                        include_json,
+                        exclude_json,
+                        note,
+                        record_id,
+                    ),
+                )
+                conn.commit()
+                return record_id
+
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO explicit_records
@@ -331,7 +373,7 @@ class WorkspaceManagerV2:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(path.resolve().as_posix()),
+                    abs_path,
                     int(is_directory),
                     int(is_recursive),
                     include_json,
@@ -340,14 +382,18 @@ class WorkspaceManagerV2:
                 ),
             )
             conn.commit()
-            return cursor.lastrowid or 0
+            record_id = cursor.lastrowid
+            if not record_id:
+                row = conn.execute("SELECT id FROM explicit_records WHERE path = ?", (abs_path,)).fetchone()
+                record_id = int(row[0]) if row else 0
+            return int(record_id)
 
     def list_explicit_records(self, workspace_id: str) -> List[WorkspaceRecord]:
         """Return all explicit records for the given workspace."""
 
         workspace_dir = self._workspace_dir(workspace_id)
         db_path = workspace_dir / "records.sqlite"
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             cursor = conn.execute(
                 """
                 SELECT id, path, is_directory, is_recursive
@@ -388,7 +434,7 @@ class WorkspaceManagerV2:
         now = int(time.time())
         abs_path = str(path.resolve().as_posix())
 
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO images
@@ -409,13 +455,21 @@ class WorkspaceManagerV2:
             return cursor.lastrowid or self._get_image_id_by_path(db_path, abs_path)
 
     def _get_image_id_by_path(self, db_path: Path, path: str) -> int:
-        with sqlite3.connect(db_path) as conn:
+        with self._connect_sqlite(db_path) as conn:
             cursor = conn.execute("SELECT id FROM images WHERE path = ?", (path,))
             row = cursor.fetchone()
             return int(row[0]) if row else 0
 
     # Compatibility-style helpers used by existing GUI code
-    def add_path(self, workspace_id: str, path: Path) -> None:
+    def add_path(
+        self,
+        workspace_id: str,
+        path: Path,
+        is_recursive: Optional[bool] = None,
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        note: Optional[str] = None,
+    ) -> None:
         """Add an explicit record and register discovered images for GUI workflows.
 
         This method mirrors the previous WorkspaceManager.add_path signature while
@@ -432,22 +486,88 @@ class WorkspaceManagerV2:
                 workspace_id=workspace_id,
                 path=path,
                 is_directory=True,
-                is_recursive=False,
+                is_recursive=bool(is_recursive) if is_recursive is not None else False,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                note=note,
             )
-            for file_path in path.rglob("*"):
-                if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                    self._register_image_with_metadata(workspace_id, file_path, parent_record_id=record_id)
+            scan_cfg = self._load_record_scan_config(workspace_id, record_id)
+            for file_path in self._iter_directory_images(
+                path,
+                recursive=scan_cfg["is_recursive"],
+                include_patterns=scan_cfg["include_patterns"],
+                exclude_patterns=scan_cfg["exclude_patterns"],
+            ):
+                self._register_image_with_metadata(workspace_id, file_path, parent_record_id=record_id)
         elif path.is_file():
             record_id = self.add_explicit_record(
                 workspace_id=workspace_id,
                 path=path,
                 is_directory=False,
                 is_recursive=False,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                note=note,
             )
             if path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 self._register_image_with_metadata(workspace_id, path, parent_record_id=record_id)
         else:
             raise FileNotFoundError(f"Path {path} not found")
+
+    def _load_record_scan_config(self, workspace_id: str, record_id: int) -> Dict[str, object]:
+        """Return scanning flags and patterns for a record."""
+
+        workspace_dir = self._workspace_dir(workspace_id)
+        db_path = workspace_dir / "records.sqlite"
+        with self._connect_sqlite(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT is_recursive, include_patterns, exclude_patterns
+                FROM explicit_records
+                WHERE id = ?
+                """,
+                (record_id,),
+            ).fetchone()
+
+        include_patterns: List[str] = []
+        exclude_patterns: List[str] = []
+        is_recursive = False
+        if row:
+            is_recursive = bool(row[0])
+            try:
+                include_patterns = json.loads(row[1]) if row[1] else []
+                exclude_patterns = json.loads(row[2]) if row[2] else []
+            except json.JSONDecodeError:
+                include_patterns = []
+                exclude_patterns = []
+
+        return {
+            "is_recursive": is_recursive,
+            "include_patterns": include_patterns,
+            "exclude_patterns": exclude_patterns,
+        }
+
+    def _iter_directory_images(
+        self,
+        directory: Path,
+        recursive: bool,
+        include_patterns: List[str],
+        exclude_patterns: List[str],
+    ):
+        """Yield images from a directory honoring recursion and include/exclude patterns."""
+
+        iterator = directory.rglob("*") if recursive else directory.iterdir()
+        for file_path in iterator:
+            if file_path.is_dir():
+                continue
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            name = file_path.name
+            if include_patterns and not any(fnmatch.fnmatch(name, pattern) for pattern in include_patterns):
+                continue
+            if exclude_patterns and any(fnmatch.fnmatch(name, pattern) for pattern in exclude_patterns):
+                continue
+            yield file_path
 
     def _register_image_with_metadata(
         self,
@@ -495,20 +615,36 @@ class WorkspaceManagerV2:
         records_db = workspace_dir / "records.sqlite"
         images_db = workspace_dir / "images.sqlite"
 
-        with sqlite3.connect(images_db) as conn:
+        removed_paths: List[str] = []
+        with self._connect_sqlite(images_db) as conn:
+            cursor = conn.execute("SELECT path FROM images WHERE parent_record_id = ?", (record_id,))
+            removed_paths = [str(Path(row[0]).resolve().as_posix()) for row in cursor.fetchall()]
             conn.execute("DELETE FROM images WHERE parent_record_id = ?", (record_id,))
             conn.commit()
 
-        with sqlite3.connect(records_db) as conn:
+        with self._connect_sqlite(records_db) as conn:
             conn.execute("DELETE FROM explicit_records WHERE id = ?", (record_id,))
             conn.commit()
+
+        if removed_paths:
+            global_index_db = (self.project_root / self.global_config.global_index_db).resolve()
+            hash_db = (self.project_root / self.global_config.hash_db).resolve()
+            with self._connect_sqlite(global_index_db) as conn:
+                conn.executemany(
+                    "DELETE FROM global_index WHERE path = ? AND workspace_id = ?",
+                    [(path, workspace_id) for path in removed_paths],
+                )
+                conn.commit()
+            with self._connect_sqlite(hash_db) as conn:
+                conn.executemany("DELETE FROM image_hashes WHERE path = ?", [(path,) for path in removed_paths])
+                conn.commit()
 
     def set_record_recursive(self, workspace_id: str, record_id: int, is_recursive: bool) -> None:
         """Update the recursion flag for an explicit directory record."""
 
         workspace_dir = self._workspace_dir(workspace_id)
         records_db = workspace_dir / "records.sqlite"
-        with sqlite3.connect(records_db) as conn:
+        with self._connect_sqlite(records_db) as conn:
             conn.execute(
                 "UPDATE explicit_records SET is_recursive = ? WHERE id = ?",
                 (int(is_recursive), record_id),
@@ -525,32 +661,40 @@ class WorkspaceManagerV2:
         total_records = 0
         total_images = 0
         indexed_images = 0
+        indexed_by_task: Dict[str, int] = {}
+        workspace = self.get_workspace(workspace_id)
+        task_names = workspace.tasks if workspace and workspace.tasks else []
 
-        with sqlite3.connect(records_db) as conn:
+        with self._connect_sqlite(records_db) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM explicit_records")
             row = cursor.fetchone()
             if row:
                 total_records = int(row[0])
 
         if images_db.exists():
-            with sqlite3.connect(images_db) as conn:
+            with self._connect_sqlite(images_db) as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM images")
                 row = cursor.fetchone()
                 if row:
                     total_images = int(row[0])
 
-                workspace = self.get_workspace(workspace_id)
-                task_name = workspace.tasks[0] if workspace and workspace.tasks else None
-                if task_name:
+                for task_name in task_names:
                     cursor = conn.execute(
                         "SELECT COUNT(*) FROM image_tasks WHERE task_name = ? AND status = 'done'",
                         (task_name,),
                     )
                     row = cursor.fetchone()
-                    if row:
-                        indexed_images = int(row[0])
+                    indexed_by_task[task_name] = int(row[0]) if row else 0
 
-        return WorkspaceStats(total_records=total_records, total_images=total_images, indexed_images=indexed_images)
+        if indexed_by_task:
+            indexed_images = min(indexed_by_task.values())
+
+        return WorkspaceStats(
+            total_records=total_records,
+            total_images=total_images,
+            indexed_images=indexed_images,
+            indexed_by_task=indexed_by_task,
+        )
 
     def has_stats(self, workspace_id: str) -> bool:
         """Return True when basic statistics can be provided for the workspace.
@@ -572,72 +716,79 @@ class WorkspaceManagerV2:
             return stats
 
         workspace = self.get_workspace(workspace_id)
-        task_name = workspace.tasks[0] if workspace and workspace.tasks else None
+        task_names = workspace.tasks if workspace and workspace.tasks else []
 
-        with sqlite3.connect(images_db) as conn:
-            if task_name:
-                cursor = conn.execute(
-                    """
-                    SELECT
-                        i.parent_record_id,
-                        COUNT(i.id) AS total_images,
-                        SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS indexed_images,
-                        MAX(i.format) AS format,
-                        MAX(i.width) AS width,
-                        MAX(i.height) AS height,
-                        MAX(i.size_bytes) AS size_bytes
-                    FROM images AS i
-                    LEFT JOIN image_tasks AS t
-                        ON i.id = t.image_id AND t.task_name = ?
-                    WHERE i.parent_record_id IS NOT NULL
-                    GROUP BY i.parent_record_id
-                    """,
-                    (task_name,),
-                )
-            else:
-                cursor = conn.execute(
-                    """
-                    SELECT
-                        i.parent_record_id,
-                        COUNT(i.id) AS total_images,
-                        0 AS indexed_images,
-                        MAX(i.format) AS format,
-                        MAX(i.width) AS width,
-                        MAX(i.height) AS height,
-                        MAX(i.size_bytes) AS size_bytes
-                    FROM images AS i
-                    WHERE i.parent_record_id IS NOT NULL
-                    GROUP BY i.parent_record_id
-                    """
-                )
-
-            for row in cursor.fetchall():
+        with self._connect_sqlite(images_db) as conn:
+            base_cursor = conn.execute(
+                """
+                SELECT
+                    i.parent_record_id,
+                    COUNT(i.id) AS total_images,
+                    MAX(i.format) AS format,
+                    MAX(i.width) AS width,
+                    MAX(i.height) AS height,
+                    MAX(i.size_bytes) AS size_bytes
+                FROM images AS i
+                WHERE i.parent_record_id IS NOT NULL
+                GROUP BY i.parent_record_id
+                """
+            )
+            for row in base_cursor.fetchall():
                 parent_id = int(row[0])
                 total_images = int(row[1] or 0)
-                indexed_images = int(row[2] or 0)
-                fmt = row[3]
-                width = int(row[4]) if row[4] is not None else None
-                height = int(row[5]) if row[5] is not None else None
-                size_bytes = int(row[6]) if row[6] is not None else None
+                fmt = row[2]
+                width = int(row[3]) if row[3] is not None else None
+                height = int(row[4]) if row[4] is not None else None
+                size_bytes = int(row[5]) if row[5] is not None else None
                 stats[parent_id] = RecordStats(
                     total_images=total_images,
-                    indexed_images=indexed_images,
+                    indexed_images=0,
                     format=fmt,
                     width=width,
                     height=height,
                     size_bytes=size_bytes,
+                    indexed_by_task={},
                 )
+
+            if task_names:
+                placeholders = ",".join("?" for _ in task_names)
+                cursor = conn.execute(
+                    f"""
+                    SELECT
+                        i.parent_record_id,
+                        t.task_name,
+                        COUNT(*) AS indexed_images
+                    FROM images AS i
+                    JOIN image_tasks AS t
+                        ON i.id = t.image_id
+                    WHERE i.parent_record_id IS NOT NULL
+                        AND t.task_name IN ({placeholders})
+                        AND t.status = 'done'
+                    GROUP BY i.parent_record_id, t.task_name
+                    """,
+                    task_names,
+                )
+
+                for parent_id_raw, task_name, indexed_count in cursor.fetchall():
+                    parent_id = int(parent_id_raw)
+                    if parent_id not in stats:
+                        continue
+                    record_stats = stats[parent_id]
+                    record_stats.indexed_by_task[task_name] = int(indexed_count or 0)
+                    if record_stats.indexed_by_task:
+                        record_stats.indexed_images = min(record_stats.indexed_by_task.values())
 
         return stats
 
     def rebuild_stats(self, workspace_id: str) -> None:
         """Compatibility hook for legacy callers.
 
-        Statistics are computed on demand from SQLite databases, so this
-        method currently performs no additional work.
+        Ensures required databases exist and triggers a fresh statistics computation.
         """
 
-        # Intentionally a no-op; kept for interface compatibility.
+        workspace_dir = self._workspace_dir(workspace_id)
+        self._ensure_records_db(workspace_dir)
+        self._ensure_images_db(workspace_dir)
         _ = self.get_workspace_stats(workspace_id)
 
 
@@ -647,32 +798,48 @@ class WorkspaceTaskCoordinator(TaskCoordinator):
     def __init__(self, manager: WorkspaceManagerV2) -> None:
         self._manager = manager
 
-    def get_pending_images(self, ctx: TaskContext) -> List[Tuple[int, Path]]:
-        """Return images that require work for the given task.
-
-        Currently selects images with no image_tasks row or with status != 'done'.
-        """
+    def claim_pending_images(self, ctx: TaskContext, limit: int | None = None) -> List[Tuple[int, Path]]:
+        """Claim images that require work for the given task and mark them in-progress."""
 
         workspace_dir = self._manager.workspace_dir_for(ctx.workspace_id)
         db_path = workspace_dir / "images.sqlite"
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.execute(
-                """
-                SELECT i.id, i.path, t.status
+        if not db_path.exists():
+            return []
+        now = int(time.time())
+
+        with self._manager._connect_sqlite(db_path) as conn:
+            query = """
+                SELECT i.id, i.path
                 FROM images AS i
                 LEFT JOIN image_tasks AS t
                     ON i.id = t.image_id AND t.task_name = ?
+                WHERE t.status IS NULL OR t.status NOT IN ('done', 'in_progress')
                 ORDER BY i.id
-                """,
-                (ctx.task_name,),
-            )
-            rows = cursor.fetchall()
+            """
+            params: list[object] = [ctx.task_name]
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit))
 
-        pending: List[Tuple[int, Path]] = []
-        for image_id, path_str, status in rows:
-            if status is None or status != "done":
-                pending.append((int(image_id), Path(path_str)))
-        return pending
+            cursor = conn.execute(query, params)
+            rows = cursor.fetchall()
+            if not rows:
+                return []
+
+            image_ids = [int(row[0]) for row in rows]
+            conn.executemany(
+                """
+                INSERT INTO image_tasks (image_id, task_name, status, last_indexed_at, result_id)
+                VALUES (?, ?, 'in_progress', ?, NULL)
+                ON CONFLICT(image_id, task_name) DO UPDATE SET
+                    status = 'in_progress',
+                    last_indexed_at = excluded.last_indexed_at
+                """,
+                [(image_id, ctx.task_name, now) for image_id in image_ids],
+            )
+            conn.commit()
+
+        return [(int(image_id), Path(path_str)) for image_id, path_str in rows]
 
     def mark_task_success(
         self,
@@ -687,7 +854,7 @@ class WorkspaceTaskCoordinator(TaskCoordinator):
         now = int(time.time())
 
         # Load path and existing file_hash for the image.
-        with sqlite3.connect(images_db) as conn:
+        with self._manager._connect_sqlite(images_db) as conn:
             cursor = conn.execute("SELECT path, file_hash FROM images WHERE id = ?", (image_id,))
             row = cursor.fetchone()
             if not row:
@@ -697,10 +864,10 @@ class WorkspaceTaskCoordinator(TaskCoordinator):
         image_path = Path(path_str)
         if file_hash is None:
             # Compute a SHA256 hash of the file contents as a stable identifier.
-            file_hash = _compute_file_hash(image_path)
+            file_hash = existing_hash or _compute_file_hash(image_path)
 
         # Update images table with the current file_hash and last_seen_at.
-        with sqlite3.connect(images_db) as conn:
+        with self._manager._connect_sqlite(images_db) as conn:
             conn.execute(
                 """
                 UPDATE images
@@ -729,7 +896,7 @@ class WorkspaceTaskCoordinator(TaskCoordinator):
 
         abs_path = str(image_path.resolve().as_posix())
 
-        with sqlite3.connect(global_index_db) as conn:
+        with self._manager._connect_sqlite(global_index_db) as conn:
             conn.execute(
                 """
                 INSERT INTO global_index (path, workspace_id, task_name, last_indexed_hash, last_indexed_at)
@@ -742,7 +909,7 @@ class WorkspaceTaskCoordinator(TaskCoordinator):
             )
             conn.commit()
 
-        with sqlite3.connect(hash_db) as conn:
+        with self._manager._connect_sqlite(hash_db) as conn:
             # Use filesystem metadata where available.
             try:
                 stat = os.stat(image_path)
@@ -772,7 +939,7 @@ class WorkspaceTaskCoordinator(TaskCoordinator):
         images_db = workspace_dir / "images.sqlite"
         now = int(time.time())
 
-        with sqlite3.connect(images_db) as conn:
+        with self._manager._connect_sqlite(images_db) as conn:
             conn.execute(
                 """
                 INSERT INTO image_tasks (image_id, task_name, status, last_indexed_at, result_id)
